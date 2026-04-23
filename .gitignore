@@ -3,3 +3,6 @@ dist/
 .env
 .env.local
 *.log
+target/
+venv/
+node_modules/
