@@ -1,0 +1,16 @@
+/Users/kuanyszarylkasyn/Desktop/Projects/soe_project-main/src/main/java/com/biosecurity/repository/RiskCheckRepository.java
+/Users/kuanyszarylkasyn/Desktop/Projects/soe_project-main/src/main/java/com/biosecurity/service/MlApiService.java
+/Users/kuanyszarylkasyn/Desktop/Projects/soe_project-main/src/main/java/com/biosecurity/config/MlApiConfig.java
+/Users/kuanyszarylkasyn/Desktop/Projects/soe_project-main/src/main/java/com/biosecurity/controller/TrendsController.java
+/Users/kuanyszarylkasyn/Desktop/Projects/soe_project-main/src/main/java/com/biosecurity/controller/RiskController.java
+/Users/kuanyszarylkasyn/Desktop/Projects/soe_project-main/src/main/java/com/biosecurity/service/NewsService.java
+/Users/kuanyszarylkasyn/Desktop/Projects/soe_project-main/src/main/java/com/biosecurity/service/RiskHistoryService.java
+/Users/kuanyszarylkasyn/Desktop/Projects/soe_project-main/src/main/java/com/biosecurity/entity/RiskCheck.java
+/Users/kuanyszarylkasyn/Desktop/Projects/soe_project-main/src/main/java/com/biosecurity/controller/NewsController.java
+/Users/kuanyszarylkasyn/Desktop/Projects/soe_project-main/src/main/java/com/biosecurity/dto/NewsResponse.java
+/Users/kuanyszarylkasyn/Desktop/Projects/soe_project-main/src/main/java/com/biosecurity/dto/NewsArticle.java
+/Users/kuanyszarylkasyn/Desktop/Projects/soe_project-main/src/main/java/com/biosecurity/config/CorsConfig.java
+/Users/kuanyszarylkasyn/Desktop/Projects/soe_project-main/src/main/java/com/biosecurity/dto/RiskUserRequest.java
+/Users/kuanyszarylkasyn/Desktop/Projects/soe_project-main/src/main/java/com/biosecurity/dto/RiskCountryRequest.java
+/Users/kuanyszarylkasyn/Desktop/Projects/soe_project-main/src/main/java/com/biosecurity/config/RestTemplateConfig.java
+/Users/kuanyszarylkasyn/Desktop/Projects/soe_project-main/src/main/java/com/biosecurity/BiosecurityApplication.java
