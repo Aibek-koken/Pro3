@@ -12,3 +12,4 @@ data/features/
 Thumbs.db
 
 .env
+target/
