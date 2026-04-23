@@ -1,0 +1,285 @@
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
+from datetime import datetime
+import pandas as pd
+import numpy as np
+import joblib
+import os
+import startup
+startup.build()
+app = FastAPI(title="BioSecurity Risk API", version="1.0")
+
+clf_model  = joblib.load("models/risk_classifier.pkl")
+iso_forest = joblib.load("models/anomaly_detector.pkl")
+scaler     = joblib.load("models/anomaly_scaler.pkl")
+le_season  = joblib.load("models/label_encoder_season.pkl")
+le_disease = joblib.load("models/label_encoder_disease.pkl")
+forecast_models = {
+    7:  joblib.load("models/forecast_7d.pkl"),
+    14: joblib.load("models/forecast_14d.pkl"),
+    30: joblib.load("models/forecast_30d.pkl"),
+}
+
+combined = pd.read_csv("data/features/combined_features.csv", low_memory=False)
+combined['date'] = pd.to_datetime(combined['date'])
+
+smooth_col = 'new_cases_7_day_avg_right' if 'new_cases_7_day_avg_right' in combined.columns else 'new_cases_smoothed'
+combined['growth_ratio_7d'] = (
+    combined[smooth_col] / (combined['cases_lag_7d'] + 1)
+).clip(0, 10)
+
+CLASSIFICATION_FEATURES = [
+    'cases_lag_7d', 'cases_lag_14d', 'cases_lag_21d',
+    'cases_ma_30d', 'growth_ratio_7d',
+    'month', 'quarter', 'day_of_week', 'season_enc', 'disease_enc',
+]
+FORECAST_FEATURES = [
+    'new_cases_per_100k', 'new_deaths_per_100k',
+    'cases_lag_7d', 'cases_lag_14d', 'cases_lag_21d',
+    'cases_ma_30d', 'month', 'quarter', 'season_enc', 'disease_enc',
+]
+ANOMALY_FEATURES = [
+    'new_cases', 'new_deaths',
+    'new_cases_per_100k', 'new_deaths_per_100k',
+    'cases_lag_7d', 'cases_lag_14d', 'cases_ma_30d',
+    'month', 'season_enc',
+]
+
+
+def compute_risk_score(country, date_str):
+    date = pd.to_datetime(date_str)
+
+    results = {}
+    for disease in combined['disease'].unique():
+        sub = combined[
+            (combined['country'] == country) &
+            (combined['disease'] == disease) &
+            (combined['date'] <= date)
+        ]
+        if len(sub) == 0:
+            continue
+        results[disease] = sub.sort_values('date').iloc[-1]
+
+    if not results:
+        raise HTTPException(status_code=404, detail=f"No data for {country}")
+
+    row = max(results.values(), key=lambda r: float(
+        r.get('cases_ma_30d') or r.get('new_cases_7_day_avg_right') or
+        r.get('new_cases', 0) or 0
+    ))
+    dominant_disease = row['disease']
+
+    # Component 1: Classification
+    X_clf     = pd.DataFrame([row.reindex(CLASSIFICATION_FEATURES).fillna(0)])
+    proba     = clf_model.predict_proba(X_clf)[0]
+    clf_score = float(proba[2]) * 50
+
+    # Component 2: Trend
+    current = float(row.get('cases_ma_30d') or row.get('new_cases_7_day_avg_right') or row.get('new_cases', 0) or 0)
+    lag_7d  = float(row.get('cases_lag_7d', 0) or 0)
+    if lag_7d < current * 0.1:
+        trend_score = 0.0
+    else:
+        growth_7d   = (current - lag_7d) / (lag_7d + 1)
+        trend_score = float(min(30, max(0, growth_7d * 20)))
+
+    # Component 3: Anomaly
+    X_an          = scaler.transform(pd.DataFrame([row.reindex(ANOMALY_FEATURES).fillna(0)]))
+    raw_score     = float(iso_forest.score_samples(X_an)[0])
+    anomaly_score = float(max(0, min(20, (-raw_score - 0.1) * 40)))
+
+    # Forecast
+    X_fc = pd.DataFrame([row.reindex(FORECAST_FEATURES).fillna(0)])
+
+    total = round(min(100, max(0, clf_score + trend_score + anomaly_score)), 1)
+    level = "HIGH" if total >= 67 else ("MEDIUM" if total >= 34 else "LOW")
+
+    return {
+        "country":           country,
+        "date":              date_str,
+        "dominant_disease":  dominant_disease,
+        "risk_score":        total,
+        "risk_level":        level,
+        "breakdown": {
+            "classification": round(clf_score, 1),
+            "forecast_trend": round(trend_score, 1),
+            "anomaly_signal": round(anomaly_score, 1),
+        },
+        "forecast": {
+            "7d":  int(max(0, forecast_models[7].predict(X_fc)[0])),
+            "14d": int(max(0, forecast_models[14].predict(X_fc)[0])),
+            "30d": int(max(0, forecast_models[30].predict(X_fc)[0])),
+        },
+        "current_cases": round(current, 0),
+        "data_last_updated": str(combined['date'].max().date()),
+    }
+
+
+# ── Эндпоинты ─────────────────────────────────────────────────────────────
+
+class UserRequest(BaseModel):
+    country: str
+    date: str
+    # симптомы со слайдеров — значения 0-10
+    fever: float = 0
+    cough: float = 0
+    fatigue: float = 0
+    breathing_issues: float = 0
+    headache: float = 0
+    body_aches: float = 0
+
+@app.post("/risk/user")
+def user_risk(req: UserRequest):
+    # Региональный риск
+    regional = compute_risk_score(req.country, req.date)
+    regional_score = regional["risk_score"]
+
+    # Персональный риск — веса симптомов
+    WEIGHTS = {
+        "fever":            3.0,  # температура — сильный сигнал
+        "breathing_issues": 4.0,  # самый опасный симптом
+        "cough":            2.0,
+        "body_aches":       2.0,
+        "headache":         1.5,
+        "fatigue":          1.0,
+    }
+
+    symptom_values = {
+        "fever":            req.fever,
+        "cough":            req.cough,
+        "fatigue":          req.fatigue,
+        "breathing_issues": req.breathing_issues,
+        "headache":         req.headache,
+        "body_aches":       req.body_aches,
+    }
+
+    # взвешенная сумма / максимально возможная сумма → 0-100
+    raw = sum(symptom_values[s] * WEIGHTS[s] for s in symptom_values)
+    max_possible = sum(10 * w for w in WEIGHTS.values())
+    personal_score = (raw / max_possible) * 100
+
+    # Итог
+    # Если эпидемия сильная — региональный риск поднимает минимальный порог
+    if regional_score >= 67:
+    # HIGH регион — минимум 40 баллов даже без симптомов
+        total = max(40, 0.6 * personal_score + 0.4 * regional_score)
+    elif regional_score >= 34:
+    # MEDIUM регион — минимум 20 баллов
+        total = max(20, 0.6 * personal_score + 0.4 * regional_score)
+    else:
+        total = 0.6 * personal_score + 0.4 * regional_score
+
+    total = round(min(100, total), 1)       
+    level = "HIGH" if total >= 67 else ("MEDIUM" if total >= 34 else "LOW")
+
+    # Рекомендации
+    recommendations = []
+    if req.breathing_issues >= 7:
+        recommendations.append("Немедленно обратитесь к врачу")
+    elif req.fever >= 5 or req.breathing_issues >= 4:
+        recommendations.append("Обратитесь к врачу в течение 24 часов")
+    if level == "HIGH":
+        recommendations.append("Самоизолируйтесь")
+        recommendations.append("Сдайте тест на инфекционные заболевания")
+    elif level == "MEDIUM":
+        recommendations.append("Избегайте мест скопления людей")
+        recommendations.append("Носите маску в закрытых помещениях")
+    if not recommendations:
+        recommendations.append("Продолжайте соблюдать стандартные меры гигиены")
+
+    return {
+        "user_risk_score":  total,
+        "risk_level":       level,
+        "regional_risk":    round(regional_score, 1),
+        "personal_score":   round(personal_score, 1),
+        "dominant_disease": regional["dominant_disease"],
+        "recommendations":  recommendations,
+        "breakdown": {
+            "personal":  round(0.6 * personal_score, 1),
+            "regional":  round(0.4 * regional_score, 1),
+        }
+    }
+
+class CountryRequest(BaseModel):
+    country: str
+    date: str  # "2024-01-15"
+
+@app.post("/risk/country")
+def country_risk(req: CountryRequest):
+    return compute_risk_score(req.country, req.date)
+
+
+@app.get("/forecast/{country}")
+def country_forecast(country: str, date: str):
+    return compute_risk_score(country, date)
+
+
+@app.get("/countries")
+def list_countries():
+    return {
+        "countries": sorted(combined['country'].unique().tolist()),
+        "total": combined['country'].nunique(),
+    }
+
+
+@app.get("/diseases")
+def list_diseases():
+    return {"diseases": combined['disease'].unique().tolist()}
+
+
+@app.get("/health")
+def health():
+    return {
+        "status": "ok",
+        "version": "1.0",
+        "data_last_updated": str(combined['date'].max().date()),
+        "countries": int(combined['country'].nunique()),
+        "diseases": combined['disease'].unique().tolist(),
+    }
+
+@app.get("/trends/{country}")
+def country_trends(country: str, months: int = 6):
+    cutoff = combined['date'].max() - pd.DateOffset(months=months)
+    
+    subset = combined[
+        (combined['country'] == country) &
+        (combined['date'] >= cutoff)
+    ].copy()
+    
+    if len(subset) == 0:
+        raise HTTPException(status_code=404, detail=f"No data for {country}")
+    
+    # Группируем по дате — суммируем все болезни
+    trends = subset.groupby('date').agg(
+        total_cases        = ('new_cases', 'sum'),
+        cases_per_100k     = ('new_cases_per_100k', 'sum'),
+        cases_ma_30d       = ('cases_ma_30d', 'sum'),
+    ).reset_index()
+    
+    trends = trends.sort_values('date')
+    
+    
+    recent = trends.tail(14)['cases_per_100k'].mean()
+    previous = trends.iloc[-28:-14]['cases_per_100k'].mean()
+    
+    if previous > 0:
+        change_pct = (recent - previous) / previous * 100
+        trend_direction = "Decreasing" if change_pct < -5 else ("Increasing" if change_pct > 5 else "Stable")
+    else:
+        trend_direction = "Stable"
+        change_pct = 0.0
+
+    return {
+        "country": country,
+        "months":  months,
+        "trend_direction": trend_direction,
+        "change_pct": round(change_pct, 1),
+        "data": [
+            {
+                "date":          str(row['date'].date()),
+                "cases_per_100k": round(float(row['cases_per_100k']), 2),
+                "cases_ma_30d":   round(float(row['cases_ma_30d']), 2),
+            }
+            for _, row in trends.iterrows()
+        ]
+    }
